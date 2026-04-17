@@ -66,8 +66,8 @@ const db = getFirestore(firebaseApp);
 const COFFEE_SHOP = {
 name: "New Sound Cafe",
 address: "5958 W. Lake St, Chicago, IL",
-hours: "7am – 9pm",
-wifi: "NewSoundCafe_Free",
+hours: "7am – 3pm",
+wifi: "Psalm40:3",
 };
 
 const AVATAR_OPTIONS = ["☕","🎧","📚","🎨","🌿","🧋","🎵","✨","🌙","🔥","🎸","🍵"];
