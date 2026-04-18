@@ -46,7 +46,8 @@ onSnapshot,
 query,
 where,
 serverTimestamp,
-} from "firebase/firestore";
+} from "firebase/firestore"
+import { getMessaging, getToken, onMessage } from "firebase/messaging";
 
 // ─── 🔥 REPLACE THESE WITH YOUR FIREBASE CONFIG ──────────────────────────────
 const firebaseConfig = {
@@ -61,7 +62,8 @@ const firebaseConfig = {
 
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
-const db = getFirestore(firebaseApp);
+const db = getFirestore(firebaseApp)
+const messaging = getMessaging(firebaseApp);
 
 const COFFEE_SHOP = {
 name: "New Sound Cafe",
@@ -575,6 +577,23 @@ if (snap.exists()) setUserProfile(snap.data());
 });
 return unsub;
 }, []);
+useEffect(() => {
+  if (!authUser) return;
+  Notification.requestPermission().then(async (permission) => {
+    if (permission === "granted") {
+      try {
+        const token = await getToken(messaging, {
+          vapidKey: "BPW8aki82JxBHWpDtesdb5hOfbRKaePGY-7YgIVLX8iXVk_cVMXJm5EBE07uwoR5VjIpEmx5it01iHPqI0vbxaE"
+        });
+        if (token) {
+          await updateDoc(doc(db, "users", authUser.uid), { fcmToken: token });
+        }
+      } catch (e) {
+        console.log("Notification setup failed", e);
+      }
+    }
+  });
+}, [authUser]);
 
 // ── Real-time: all users ──
 useEffect(() => {
@@ -630,9 +649,17 @@ if (isHere) {
 showToast("📍 Checked in at New Sound Cafe!");
 // Notify all other users
 for (const u of allUsers) {
-if (u.uid !== authUser.uid) {
-await addNotification(u.uid, `${userProfile.displayName} just arrived at New Sound Cafe!`, "☕");
-}
+  if (u.uid !== authUser.uid) {
+    await addNotification(u.uid, `${userProfile.displayName} just arrived at New Sound Cafe!`, "☕");
+    if (u.fcmToken) {
+      await addDoc(collection(db, "pushQueue"), {
+        token: u.fcmToken,
+        title: "New Sound Cafe",
+        body: `${userProfile.displayName} just arrived! ☕`,
+        createdAt: serverTimestamp(),
+      });
+    }
+  }
 }
 } else {
 showToast("👋 Checked out!");

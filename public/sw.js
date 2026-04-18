@@ -32,3 +32,25 @@ return res;
 .catch(() => caches.match(e.request))
 );
 });
+// Firebase Push Notifications
+importScripts("https://www.gstatic.com/firebasejs/10.0.0/firebase-app-compat.js");
+importScripts("https://www.gstatic.com/firebasejs/10.0.0/firebase-messaging-compat.js");
+
+firebase.initializeApp({
+  apiKey: "AIzaSyCt7hUsJDUt2lkkgX911wcdvjKXW9iXH0I",
+  authDomain: "cafe-crew-30a55.firebaseapp.com",
+  projectId: "cafe-crew-30a55",
+  storageBucket: "cafe-crew-30a55.firebasestorage.app",
+  messagingSenderId: "987104919432",
+  appId: "1:987104919432:web:da3b249fc4feaeac7c443d",
+});
+
+const messaging = firebase.messaging();
+
+messaging.onBackgroundMessage((payload) => {
+  self.registration.showNotification(payload.notification.title, {
+    body: payload.notification.body,
+    icon: "/apple-touch-icon.png",
+    badge: "/apple-touch-icon.png",
+  });
+});
