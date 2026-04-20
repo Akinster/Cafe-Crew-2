@@ -31,6 +31,7 @@ signInWithEmailAndPassword,
 signOut,
 onAuthStateChanged,
 updateProfile,
+sendPasswordResetEmail,
 } from "firebase/auth";
 import {
 getFirestore,
@@ -276,7 +277,27 @@ body{font-family:‘DM Sans’,sans-serif;background:var(–cream);color:var(–
 /* loading */
 .loading{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(–espresso);font-size:32px;animation:spin 1s linear infinite;}
 @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+
+/* forgot password */
+.auth-forgot{background:none;border:none;color:var(--muted);font-family:'DM Sans',sans-serif;font-size:11px;cursor:pointer;padding:8px 0 2px;display:block;width:100%;text-align:center;text-decoration:underline;}
+.auth-forgot:hover{color:var(--accent);}
+.auth-reset-msg{font-size:12px;color:#4ade80;margin-top:8px;text-align:center;}
+
+/* username editing */
+.uname-edit-row{display:flex;align-items:center;gap:6px;flex:1;}
+.uname-input{flex:1;background:var(--warm);border:1.5px solid var(--accent);border-radius:9px;padding:5px 9px;font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text);outline:none;}
+.uname-save{background:var(--espresso);color:var(--warm);border:none;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;white-space:nowrap;}
+.uname-cancel{background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:2px 4px;}
+.edit-name-btn{background:none;border:none;font-size:12px;color:var(--accent);cursor:pointer;padding:0 3px;opacity:0.7;}
+.edit-name-btn:hover{opacity:1;}
+
+/* group assignment modal */
+.gopt{width:100%;background:var(--warm);border:none;border-radius:11px;padding:11px 14px;text-align:left;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;color:var(--text);cursor:pointer;margin-bottom:6px;transition:background 0.18s;display:block;}
+.gopt:hover{background:var(--steam);}
+.gopt.sel{background:var(--espresso);color:var(--warm);}
+.gopt.remove{opacity:0.55;font-style:italic;}
 `;
+
 
 // ─── Map Component ────────────────────────────────────────────────────────────
 function CoffeeMap({ checkedInUsers }) {
@@ -460,6 +481,19 @@ const [avatar, setAvatar] = useState("☕");
 const [color, setColor] = useState("#c17f3e");
 const [loading, setLoading] = useState(false);
 const [error, setError] = useState("");
+const [resetSent, setResetSent] = useState(false);
+
+const handleForgotPassword = async () => {
+if (!email) { setError("Enter your email first to reset your password."); return; }
+setLoading(true); setError("");
+try {
+  await sendPasswordResetEmail(auth, email);
+  setResetSent(true);
+} catch (e) {
+  setError("Couldn't send reset email. Check your address.");
+}
+setLoading(false);
+};
 
 const handleSubmit = async () => {
 setError(""); setLoading(true);
@@ -538,9 +572,13 @@ return (
 onKeyDown={e=>e.key==="Enter"&&handleSubmit()}/>
 </div>
 {error&&<div className="auth-err">{error}</div>}
+{resetSent&&<div className="auth-reset-msg">✓ Reset email sent! Check your inbox.</div>}
 <button className="auth-btn" onClick={handleSubmit} disabled={loading}>
 {loading?"Loading...": mode==="signup"?"Join the Gang ☕":"Sign In"}
 </button>
+{mode==="signin"&&!resetSent&&(
+  <button className="auth-forgot" onClick={handleForgotPassword} disabled={loading}>Forgot password?</button>
+)}
 </div>
 </div>
 );
@@ -562,6 +600,9 @@ const [rsvp, setRsvp] = useState(null);
 const [toast, setToast] = useState(null);
 const [showPollModal, setShowPollModal] = useState(false);
 const [newPollLabel, setNewPollLabel] = useState("");
+const [editingUsername, setEditingUsername] = useState(false);
+const [newUsername, setNewUsername] = useState("");
+const [groupAssignTarget, setGroupAssignTarget] = useState(null);
 
 const showToast = (msg) => { setToast(msg); setTimeout(()=>setToast(null),2500); };
 const unread = notifications.filter(n=>!n.read).length;
@@ -599,8 +640,11 @@ useEffect(() => {
 useEffect(() => {
 if (!authUser) return;
 const unsub = onSnapshot(collection(db, "users"), (snap) => {
-setAllUsers(snap.docs.map(d=>d.data()));
-setCheckedInUsers(snap.docs.map(d=>d.data()).filter(u=>u.isHere));
+const users = snap.docs.map(d=>d.data());
+setAllUsers(users);
+setCheckedInUsers(users.filter(u=>u.isHere));
+const me = users.find(u=>u.uid===authUser.uid);
+if (me) setUserProfile(me);
 });
 return unsub;
 }, [authUser]);
@@ -633,6 +677,23 @@ setNotifications(snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.created
 return unsub;
 }, [authUser]);
 
+// ── Auto checkout at 3pm Chicago time ──
+useEffect(() => {
+if (!authUser || !userProfile) return;
+const checkTime = () => {
+  const chicagoStr = new Date().toLocaleString("en-US", {timeZone:"America/Chicago"});
+  const hour = new Date(chicagoStr).getHours();
+  if (hour >= 15 && userProfile.isHere) {
+    updateDoc(doc(db, "users", authUser.uid), {isHere: false});
+    setUserProfile(p=>({...p, isHere:false}));
+    showToast("🕒 Auto checked out — cafe closes at 3pm!");
+  }
+};
+checkTime();
+const iv = setInterval(checkTime, 60000);
+return () => clearInterval(iv);
+}, [authUser, userProfile?.isHere]);
+
 const addNotification = async (uid, text, icon) => {
 await addDoc(collection(db, "notifications"), {
 uid, text, icon, read: false, createdAt: serverTimestamp(),
@@ -663,6 +724,19 @@ for (const u of allUsers) {
 }
 } else {
 showToast("👋 Checked out!");
+for (const u of allUsers) {
+  if (u.uid !== authUser.uid) {
+    await addNotification(u.uid, `${userProfile.displayName} just left New Sound Cafe.`, "👋");
+    if (u.fcmToken) {
+      await addDoc(collection(db, "pushQueue"), {
+        token: u.fcmToken,
+        title: "New Sound Cafe",
+        body: `${userProfile.displayName} just left. 👋`,
+        createdAt: serverTimestamp(),
+      });
+    }
+  }
+}
 }
 };
 
@@ -686,12 +760,26 @@ showToast({yes:"🎉 You’re going!",maybe:"🤔 Marked as maybe",no:"👋 Decl
 // ── Add poll ──
 const handleAddPoll = async () => {
 if (!newPollLabel.trim()) return;
+const label = newPollLabel.trim();
 await addDoc(collection(db, "polls"), {
-label: newPollLabel.trim(),
+label,
 votes: [],
 createdBy: authUser.uid,
 createdAt: serverTimestamp(),
 });
+for (const u of allUsers) {
+  if (u.uid !== authUser.uid) {
+    await addNotification(u.uid, `${userProfile.displayName} suggested a meetup: "${label}"`, "🗳️");
+    if (u.fcmToken) {
+      await addDoc(collection(db, "pushQueue"), {
+        token: u.fcmToken,
+        title: "New meetup time suggested!",
+        body: `${userProfile.displayName}: "${label}"`,
+        createdAt: serverTimestamp(),
+      });
+    }
+  }
+}
 setNewPollLabel("");
 setShowPollModal(false);
 showToast("📅 Poll added!");
@@ -707,6 +795,21 @@ avatar: userProfile?.avatar || "☕",
 color: userProfile?.color || "#c17f3e",
 createdAt: serverTimestamp(),
 });
+const fmtT = (t) => { const [h,m]=t.split(":").map(Number); return `${h%12||12}:${String(m).padStart(2,"0")}${h>=12?"pm":"am"}`; };
+const name = userProfile?.displayName || "Someone";
+for (const u of allUsers) {
+  if (u.uid !== authUser.uid) {
+    await addNotification(u.uid, `${name} is planning a visit on ${v.date} at ${fmtT(v.start)}`, "🗓️");
+    if (u.fcmToken) {
+      await addDoc(collection(db, "pushQueue"), {
+        token: u.fcmToken,
+        title: "New visit planned!",
+        body: `${name} will be at the cafe on ${v.date}`,
+        createdAt: serverTimestamp(),
+      });
+    }
+  }
+}
 showToast("📅 Visit added to calendar!");
 };
 
@@ -724,6 +827,26 @@ await updateDoc(doc(db, "users", authUser.uid), { isHere: false });
 await signOut(auth);
 };
 
+// ── Update username ──
+const handleUpdateUsername = async () => {
+if (!newUsername.trim()) return;
+const name = newUsername.trim();
+await updateProfile(auth.currentUser, {displayName: name});
+await updateDoc(doc(db, "users", authUser.uid), {displayName: name});
+setUserProfile(p=>({...p, displayName: name}));
+setEditingUsername(false);
+showToast("✓ Username updated!");
+};
+
+// ── Assign friend to group ──
+const handleAssignGroup = async (friendUid, group) => {
+const updated = {...(userProfile.friendGroups||{}), [friendUid]: group};
+await updateDoc(doc(db, "users", authUser.uid), {friendGroups: updated});
+setUserProfile(p=>({...p, friendGroups: updated}));
+setGroupAssignTarget(null);
+showToast(`✓ Moved to ${group}`);
+};
+
 // ── Clear notifications ──
 const clearNotifs = async () => {
 for (const n of notifications) {
@@ -732,9 +855,10 @@ if (!n.read) await updateDoc(doc(db, "notifications", n.id), { read: true });
 setShowNotifs(false);
 };
 
+const myFriendGroups = userProfile?.friendGroups || {};
 const filteredFriends = allUsers.filter(u =>
 u.uid !== authUser?.uid &&
-(selectedGroup === "All Friends" || u.group === selectedGroup)
+(selectedGroup === "All Friends" || myFriendGroups[u.uid] === selectedGroup)
 );
 
 // Loading state
@@ -844,7 +968,7 @@ return (
                   <div className="fname">{u.displayName}{u.isHere&&<span className="htag">HERE</span>}</div>
                   <div className="fstatus">{u.status||""}</div>
                 </div>
-                <div className="fgtag">{u.group||"All Friends"}</div>
+                <div className="fgtag" style={{cursor:"pointer"}} title="Tap to change group" onClick={()=>setGroupAssignTarget(u.uid)}>{myFriendGroups[u.uid]||"All Friends"} ✎</div>
               </div>
             ))}
           </div>
@@ -854,7 +978,21 @@ return (
             <div className="frow">
               <div className="favatar" style={{background:(userProfile?.color||"#c17f3e")+"33"}}>{userProfile?.avatar||"☕"}{userProfile?.isHere&&<div className="hring"/>}</div>
               <div className="finfo">
-                <div className="fname">{userProfile?.displayName} <span style={{fontSize:9,background:"var(--accent)",color:"white",padding:"2px 5px",borderRadius:7,fontWeight:700}}>YOU</span></div>
+                <div className="fname">
+                  {editingUsername?(
+                    <div className="uname-edit-row">
+                      <input className="uname-input" value={newUsername} onChange={e=>setNewUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleUpdateUsername()} autoFocus maxLength={30}/>
+                      <button className="uname-save" onClick={handleUpdateUsername}>Save</button>
+                      <button className="uname-cancel" onClick={()=>setEditingUsername(false)}>✕</button>
+                    </div>
+                  ):(
+                    <>
+                      {userProfile?.displayName}
+                      <span style={{fontSize:9,background:"var(--accent)",color:"white",padding:"2px 5px",borderRadius:7,fontWeight:700}}>YOU</span>
+                      <button className="edit-name-btn" title="Edit username" onClick={()=>{setNewUsername(userProfile?.displayName||"");setEditingUsername(true);}}>✎</button>
+                    </>
+                  )}
+                </div>
                 <div className="fstatus">{userProfile?.email}</div>
               </div>
             </div>
@@ -948,6 +1086,21 @@ return (
           </div>
           <button className="msub" onClick={handleAddPoll}>Add to Poll ✓</button>
           <button className="mcancel" onClick={()=>setShowPollModal(false)}>Cancel</button>
+        </div>
+      </div>
+    )}
+
+    {/* Group Assignment Modal */}
+    {groupAssignTarget&&(
+      <div className="overlay" onClick={()=>setGroupAssignTarget(null)}>
+        <div className="modal" onClick={e=>e.stopPropagation()}>
+          <div className="mhandle"/>
+          <div className="mtitle">Move to group</div>
+          {GROUPS.filter(g=>g!=="All Friends").map(g=>(
+            <button key={g} className={`gopt${(myFriendGroups[groupAssignTarget]||"")===g?" sel":""}`} onClick={()=>handleAssignGroup(groupAssignTarget,g)}>{g}</button>
+          ))}
+          <button className="gopt remove" onClick={()=>handleAssignGroup(groupAssignTarget,"All Friends")}>Remove from group</button>
+          <button className="mcancel" onClick={()=>setGroupAssignTarget(null)}>Cancel</button>
         </div>
       </div>
     )}
