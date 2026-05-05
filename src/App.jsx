@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import {
   getAuth,
@@ -15,19 +15,23 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocs,
   addDoc,
   deleteDoc,
   updateDoc,
   onSnapshot,
   query,
   where,
+  orderBy,
+  limit,
   serverTimestamp,
 } from "firebase/firestore";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { getMessaging, getToken } from "firebase/messaging";
 import {
   MapPin, Users, Calendar, CalendarDays, Bell, LogOut,
   Check, ChevronLeft, ChevronRight, X, Pencil, Vote,
-  Clock, Wifi, Coffee, Sparkles, Navigation,
+  Clock, Wifi, Coffee, Sparkles, Navigation, Camera, Image as ImageIcon, Send,
 } from "lucide-react";
 import { cn } from "./lib/utils";
 
@@ -43,6 +47,7 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
+const storage = getStorage(firebaseApp);
 
 let messaging = null;
 try {
@@ -63,7 +68,7 @@ const COLOR_OPTIONS = [
   "#3B82F6","#EF4444","#F59E0B","#10B981","#8B5CF6",
   "#EC4899","#06B6D4","#F97316","#6366F1","#14B8A6",
 ];
-const GROUPS = ["All Friends", "Close Crew", "Study Gang", "Work Pals"];
+const GROUPS = ["All Friends", "Work Pals"];
 
 // ─── Map Component ────────────────────────────────────────────────────────────
 function CoffeeMap({ checkedInUsers }) {
@@ -107,10 +112,12 @@ function CoffeeMap({ checkedInUsers }) {
             style={{ left: `${x}%`, top: `${y}%`, animationDelay: `${i * 0.1}s` }}>
             <div className="relative">
               <div
-                className="flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-2xl border-2 border-white text-lg shadow-lg transition-transform hover:scale-110"
+                className="flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border-2 border-white text-lg shadow-lg transition-transform hover:scale-110"
                 style={{ background: u.color || "#3B82F6" }}
               >
-                {u.avatar || "☕"}
+                {u.profilePicUrl ? (
+                  <img src={u.profilePicUrl} className="h-full w-full object-cover" alt="" />
+                ) : (u.avatar || "☕")}
               </div>
               <div className="absolute -bottom-1 left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full border-2 border-white bg-success" />
             </div>
@@ -405,6 +412,39 @@ function AuthScreen({ onAuth }) {
           group: "All Friends",
           createdAt: serverTimestamp(),
         });
+        try {
+          const existingSnap = await getDocs(collection(db, "users"));
+          const joinPromises = [];
+          existingSnap.forEach(existingDoc => {
+            const u = existingDoc.data();
+            if (u.uid !== cred.user.uid) {
+              joinPromises.push(
+                addDoc(collection(db, "notifications"), {
+                  uid: u.uid,
+                  text: `${displayName.trim()} just joined New Sound Gang!`,
+                  icon: "🎉",
+                  read: false,
+                  createdAt: serverTimestamp(),
+                })
+              );
+              if (u.email) {
+                joinPromises.push(
+                  addDoc(collection(db, "mail"), {
+                    to: u.email,
+                    message: {
+                      subject: "New member joined New Sound Gang!",
+                      html: `<p>Hey! <strong>${displayName.trim()}</strong> just joined New Sound Gang. Say hello next time you're at New Sound Cafe! ☕</p>`,
+                      text: `Hey! ${displayName.trim()} just joined New Sound Gang. Say hello next time at New Sound Cafe!`,
+                    },
+                  })
+                );
+              }
+            }
+          });
+          await Promise.all(joinPromises);
+        } catch (e) {
+          console.log("Failed to send join notifications", e);
+        }
         onAuth(cred.user);
       } else {
         const cred = await signInWithEmailAndPassword(auth, email, password);
@@ -516,6 +556,15 @@ export default function App() {
   const [editingUsername, setEditingUsername] = useState(false);
   const [newUsername, setNewUsername] = useState("");
   const [groupAssignTarget, setGroupAssignTarget] = useState(null);
+  const [newPollDate, setNewPollDate] = useState(new Date().toISOString().slice(0, 10));
+  const [posts, setPosts] = useState([]);
+  const [newPostText, setNewPostText] = useState("");
+  const [newPostPhoto, setNewPostPhoto] = useState(null);
+  const [newPostPhotoPreview, setNewPostPhotoPreview] = useState(null);
+  const [posting, setPosting] = useState(false);
+  const [profilePicUploading, setProfilePicUploading] = useState(false);
+  const photoInputRef = useRef(null);
+  const profilePicInputRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
   const unread = notifications.filter(n => !n.read).length;
@@ -558,15 +607,34 @@ export default function App() {
       setCheckedInUsers(users.filter(u => u.isHere));
       const me = users.find(u => u.uid === authUser.uid);
       if (me) setUserProfile(me);
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      snap.docs.forEach(d => {
+        const u = d.data();
+        if (u.status === "Just joined!" && u.createdAt?.seconds * 1000 < cutoff) {
+          updateDoc(doc(db, "users", u.uid), { status: "" }).catch(console.error);
+        }
+      });
     });
     return unsub;
   }, [authUser]);
 
-  // Real-time: polls
+  // Real-time: polls — auto-delete expired
   useEffect(() => {
     if (!authUser) return;
     const unsub = onSnapshot(collection(db, "polls"), (snap) => {
-      setPolls(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const expired = snap.docs.filter(d => {
+        const p = d.data();
+        return p.date && p.date < todayStr;
+      });
+      if (expired.length > 0) {
+        expired.forEach(d => deleteDoc(doc(db, "polls", d.id)).catch(console.error));
+      }
+      setPolls(
+        snap.docs
+          .map(d => ({ id: d.id, ...d.data() }))
+          .filter(p => !p.date || p.date >= todayStr)
+      );
     });
     return unsub;
   }, [authUser]);
@@ -590,6 +658,16 @@ export default function App() {
           .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
       );
     });
+    return unsub;
+  }, [authUser]);
+
+  // Real-time: posts feed
+  useEffect(() => {
+    if (!authUser) return;
+    const unsub = onSnapshot(
+      query(collection(db, "posts"), orderBy("createdAt", "desc"), limit(30)),
+      snap => setPosts(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
     return unsub;
   }, [authUser]);
 
@@ -628,6 +706,16 @@ export default function App() {
           if (u.fcmToken) {
             await addDoc(collection(db, "pushQueue"), { token: u.fcmToken, title: "New Sound Cafe", body: `${userProfile.displayName} just arrived!`, createdAt: serverTimestamp() });
           }
+          if (u.email) {
+            await addDoc(collection(db, "mail"), {
+              to: u.email,
+              message: {
+                subject: `${userProfile.displayName} just checked in at New Sound!`,
+                html: `<p><strong>${userProfile.displayName}</strong> just checked in at New Sound Cafe. Head over! ☕</p>`,
+                text: `${userProfile.displayName} just checked in at New Sound Cafe. Head over!`,
+              },
+            });
+          }
         }
       }
     } else {
@@ -665,16 +753,28 @@ export default function App() {
   const handleAddPoll = async () => {
     if (!newPollLabel.trim() || !authUser || !userProfile) return;
     const label = newPollLabel.trim();
-    await addDoc(collection(db, "polls"), { label, votes: [], createdBy: authUser.uid, createdAt: serverTimestamp() });
+    await addDoc(collection(db, "polls"), { label, date: newPollDate, votes: [], createdBy: authUser.uid, createdAt: serverTimestamp() });
     for (const u of allUsers) {
       if (u.uid !== authUser.uid) {
         await addNotification(u.uid, `${userProfile.displayName} suggested a meetup: "${label}"`, "🗳️");
         if (u.fcmToken) {
           await addDoc(collection(db, "pushQueue"), { token: u.fcmToken, title: "New meetup time suggested!", body: `${userProfile.displayName}: "${label}"`, createdAt: serverTimestamp() });
         }
+        if (u.email) {
+          await addDoc(collection(db, "mail"), {
+            to: u.email,
+            message: {
+              subject: "New meetup time suggested!",
+              html: `<p><strong>${userProfile.displayName}</strong> suggested a meetup time: <strong>${label}</strong> on <strong>${newPollDate}</strong>. Head to New Sound Gang to vote!</p>`,
+              text: `${userProfile.displayName} suggested a meetup time: ${label} on ${newPollDate}. Head to New Sound Gang to vote!`,
+            },
+          });
+        }
       }
     }
-    setNewPollLabel(""); setShowPollModal(false);
+    setNewPollLabel("");
+    setNewPollDate(new Date().toISOString().slice(0, 10));
+    setShowPollModal(false);
     showToast("Poll added!");
   };
 
@@ -696,6 +796,16 @@ export default function App() {
         if (u.fcmToken) {
           await addDoc(collection(db, "pushQueue"), { token: u.fcmToken, title: "New visit planned!", body: `${name} will be at the cafe on ${v.date}`, createdAt: serverTimestamp() });
         }
+        if (u.email) {
+          await addDoc(collection(db, "mail"), {
+            to: u.email,
+            message: {
+              subject: `${name} is planning a cafe visit!`,
+              html: `<p><strong>${name}</strong> is planning a visit to New Sound Cafe on <strong>${v.date}</strong> at <strong>${fmtT(v.start)}</strong>. Join them! ☕</p>`,
+              text: `${name} is planning a visit to New Sound Cafe on ${v.date} at ${fmtT(v.start)}. Join them!`,
+            },
+          });
+        }
       }
     }
     showToast("Visit added to calendar!");
@@ -705,6 +815,53 @@ export default function App() {
   const handleDeleteVisit = async (id) => {
     await deleteDoc(doc(db, "visits", id));
     showToast("Visit removed");
+  };
+
+  // Add post
+  const handleAddPost = async () => {
+    if ((!newPostText.trim() && !newPostPhoto) || posting) return;
+    setPosting(true);
+    try {
+      let photoUrl = null;
+      if (newPostPhoto) {
+        const storageRef = ref(storage, `posts/${authUser.uid}/${Date.now()}`);
+        await uploadBytes(storageRef, newPostPhoto);
+        photoUrl = await getDownloadURL(storageRef);
+      }
+      await addDoc(collection(db, "posts"), {
+        text: newPostText.trim(),
+        photoUrl,
+        uid: authUser.uid,
+        displayName: userProfile?.displayName || "Friend",
+        avatar: userProfile?.avatar || "☕",
+        color: userProfile?.color || "#3B82F6",
+        profilePicUrl: userProfile?.profilePicUrl || null,
+        createdAt: serverTimestamp(),
+      });
+      setNewPostText("");
+      setNewPostPhoto(null);
+      setNewPostPhotoPreview(null);
+    } catch {
+      showToast("Couldn't post. Try again.");
+    }
+    setPosting(false);
+  };
+
+  // Upload profile picture
+  const handleUploadProfilePic = async (file) => {
+    if (!file || !authUser) return;
+    setProfilePicUploading(true);
+    try {
+      const storageRef = ref(storage, `profilePics/${authUser.uid}`);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      await updateDoc(doc(db, "users", authUser.uid), { profilePicUrl: url });
+      setUserProfile(p => p ? { ...p, profilePicUrl: url } : null);
+      showToast("Profile picture updated!");
+    } catch {
+      showToast("Couldn't upload photo.");
+    }
+    setProfilePicUploading(false);
   };
 
   // Sign out
@@ -866,6 +1023,61 @@ export default function App() {
               </div>
               <ChevronRight className="h-5 w-5 opacity-60" />
             </button>
+            {/* Post composer */}
+            <div className="rounded-3xl bg-white p-4 shadow-sm shadow-foreground/5">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-base"
+                  style={{ background: userProfile?.color || "#3B82F6" }}>
+                  {userProfile?.profilePicUrl ? (
+                    <img src={userProfile.profilePicUrl} className="h-full w-full object-cover" alt="" />
+                  ) : (userProfile?.avatar || "☕")}
+                </div>
+                <div className="flex-1">
+                  <textarea
+                    rows={2}
+                    className="w-full resize-none rounded-2xl border-0 bg-secondary px-4 py-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-primary"
+                    placeholder="Share a moment at New Sound..."
+                    value={newPostText}
+                    onChange={e => setNewPostText(e.target.value)}
+                    maxLength={300}
+                  />
+                  {newPostPhotoPreview && (
+                    <div className="relative mt-2 overflow-hidden rounded-2xl">
+                      <img src={newPostPhotoPreview} className="max-h-48 w-full object-cover" alt="" />
+                      <button
+                        className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full bg-foreground/60 text-white"
+                        onClick={() => { setNewPostPhoto(null); setNewPostPhotoPreview(null); }}>
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
+                  <div className="mt-2 flex items-center justify-between">
+                    <button
+                      className="flex items-center gap-1.5 rounded-xl bg-secondary px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted"
+                      onClick={() => photoInputRef.current?.click()}>
+                      <ImageIcon className="h-4 w-4" /> Photo
+                    </button>
+                    <input ref={photoInputRef} type="file" accept="image/*" className="hidden"
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        setNewPostPhoto(file);
+                        const reader = new FileReader();
+                        reader.onload = ev => setNewPostPhotoPreview(ev.target.result);
+                        reader.readAsDataURL(file);
+                        e.target.value = "";
+                      }} />
+                    <button
+                      className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-md shadow-primary/20 disabled:opacity-50"
+                      onClick={handleAddPost}
+                      disabled={posting || (!newPostText.trim() && !newPostPhoto)}>
+                      <Send className="h-3.5 w-3.5" />{posting ? "Posting..." : "Post"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="flex items-center gap-4 rounded-3xl bg-white p-4 shadow-sm shadow-foreground/5">
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100">
                 <Coffee className="h-7 w-7 text-blue-600" />
@@ -900,8 +1112,10 @@ export default function App() {
                   <div key={u.uid} className="animate-slide-up flex items-center gap-3 rounded-2xl bg-secondary/50 p-3"
                     style={{ animationDelay: `${i * 0.05}s` }}>
                     <div className="relative">
-                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl text-lg" style={{ background: u.color || "#3B82F6" }}>
-                        {u.avatar || "☕"}
+                      <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl text-lg" style={{ background: u.color || "#3B82F6" }}>
+                        {u.profilePicUrl ? (
+                          <img src={u.profilePicUrl} className="h-full w-full object-cover" alt="" />
+                        ) : (u.avatar || "☕")}
                       </div>
                       <div className="animate-pulse-ring absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white bg-success" />
                     </div>
@@ -917,6 +1131,48 @@ export default function App() {
                 ))}
               </div>
             </div>
+
+            {/* Posts feed */}
+            {posts.length > 0 && (
+              <div className="rounded-3xl bg-white p-5 shadow-sm shadow-foreground/5">
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-pink-100">
+                    <ImageIcon className="h-5 w-5 text-pink-600" />
+                  </div>
+                  <h3 className="font-semibold text-foreground">Gang Feed</h3>
+                </div>
+                <div className="space-y-4">
+                  {posts.map((post, i) => {
+                    const ts = post.createdAt?.seconds
+                      ? new Date(post.createdAt.seconds * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+                      : "just now";
+                    return (
+                      <div key={post.id} className="animate-slide-up" style={{ animationDelay: `${i * 0.03}s` }}>
+                        <div className="mb-2 flex items-center gap-2.5">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl text-base"
+                            style={{ background: post.color || "#3B82F6" }}>
+                            {post.profilePicUrl ? (
+                              <img src={post.profilePicUrl} className="h-full w-full object-cover" alt="" />
+                            ) : (post.avatar || "☕")}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold leading-none text-foreground">{post.displayName}</p>
+                            <p className="mt-0.5 text-[10px] text-muted-foreground">{ts}</p>
+                          </div>
+                        </div>
+                        {post.text && <p className="mb-2 text-sm leading-relaxed text-foreground">{post.text}</p>}
+                        {post.photoUrl && (
+                          <div className="overflow-hidden rounded-2xl">
+                            <img src={post.photoUrl} className="max-h-72 w-full object-cover" alt="" loading="lazy" />
+                          </div>
+                        )}
+                        {i < posts.length - 1 && <div className="mt-4 border-b border-border/40" />}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -988,10 +1244,25 @@ export default function App() {
               </div>
               <div className="flex items-center gap-3 rounded-2xl bg-secondary/50 p-3">
                 <div className="relative">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl text-xl" style={{ background: userProfile?.color || "#4ECDC4" }}>
-                    {userProfile?.avatar || "☕"}
+                  <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl text-xl" style={{ background: userProfile?.color || "#4ECDC4" }}>
+                    {userProfile?.profilePicUrl ? (
+                      <img src={userProfile.profilePicUrl} className="h-full w-full object-cover" alt="" />
+                    ) : (userProfile?.avatar || "☕")}
                   </div>
-                  {userProfile?.isHere && <div className="animate-pulse-ring absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white bg-success" />}
+                  <button
+                    className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-primary shadow-sm disabled:opacity-60"
+                    onClick={() => profilePicInputRef.current?.click()}
+                    disabled={profilePicUploading}
+                    title="Change profile picture">
+                    {profilePicUploading ? (
+                      <div className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    ) : (
+                      <Camera className="h-3 w-3 text-white" />
+                    )}
+                  </button>
+                  <input ref={profilePicInputRef} type="file" accept="image/*" className="hidden"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) handleUploadProfilePic(f); e.target.value = ""; }} />
+                  {userProfile?.isHere && <div className="animate-pulse-ring absolute -top-0.5 -left-0.5 h-3.5 w-3.5 rounded-full border-2 border-white bg-success" />}
                 </div>
                 <div className="min-w-0 flex-1">
                   {editingUsername ? (
@@ -1065,6 +1336,7 @@ export default function App() {
                       <div className="relative flex items-center justify-between">
                         <div>
                           <p className="text-sm font-semibold text-foreground">{p.label}{lead && " 🔥"}</p>
+                          {p.date && <p className="text-[10px] text-muted-foreground">{new Date(p.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</p>}
                           <div className="mt-2 flex">
                             {voterProfiles.map((u, i) => u && (
                               <div key={i} className="-mr-1.5 flex h-6 w-6 items-center justify-center rounded-lg border-2 border-white text-xs" style={{ background: u.color || "#3B82F6" }}>
@@ -1143,10 +1415,17 @@ export default function App() {
             onClick={e => e.stopPropagation()}>
             <div className="mx-auto mb-6 h-1 w-12 rounded-full bg-border" />
             <h3 className="mb-6 text-xl font-semibold text-foreground">Suggest a meetup time</h3>
+            <div className="mb-4">
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Date</label>
+              <input type="date"
+                className="w-full rounded-2xl border-0 bg-secondary px-4 py-3.5 text-sm text-foreground outline-none transition-all focus:ring-2 focus:ring-primary"
+                value={newPollDate} min={new Date().toISOString().slice(0, 10)}
+                onChange={e => setNewPollDate(e.target.value)} />
+            </div>
             <div className="mb-6">
               <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">Time / Description</label>
               <input className="w-full rounded-2xl border-0 bg-secondary px-4 py-3.5 text-sm text-foreground outline-none placeholder:text-muted-foreground transition-all focus:ring-2 focus:ring-primary"
-                placeholder="e.g. Saturday 2 PM, Tomorrow morning..." value={newPollLabel}
+                placeholder="e.g. 2 PM, Morning coffee, After work..." value={newPollLabel}
                 onChange={e => setNewPollLabel(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAddPoll()} />
             </div>
             <button className="w-full rounded-2xl bg-primary py-4 text-base font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:shadow-xl active:scale-[0.98]"

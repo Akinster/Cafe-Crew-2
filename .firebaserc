@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "cafe-crew-30a55"
-  }
+    "default": "cafe-crew-30a55",
+    "church": "church-sms--funmi"
+  },
+  "targets": {},
+  "etags": {}
 }

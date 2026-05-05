@@ -44,6 +44,27 @@ exports.autoCheckout = functions.pubsub
     return null;
   });
 
+exports.clearJoinedStatus = functions.pubsub
+  .schedule("0 * * * *")
+  .onRun(async () => {
+    const db = admin.firestore();
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const snap = await db.collection("users").where("status", "==", "Just joined!").get();
+    if (snap.empty) return null;
+    const batch = db.batch();
+    let count = 0;
+    snap.forEach((userDoc) => {
+      const createdAt = userDoc.data().createdAt?.toDate();
+      if (createdAt && createdAt < cutoff) {
+        batch.update(userDoc.ref, { status: "" });
+        count++;
+      }
+    });
+    if (count > 0) await batch.commit();
+    console.log(`clearJoinedStatus: cleared ${count} user(s).`);
+    return null;
+  });
+
 exports.sendPushNotification = functions.firestore
   .document("pushQueue/{docId}")
   .onCreate(async (snap) => {
